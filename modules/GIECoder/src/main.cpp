@@ -40,7 +40,7 @@
 
 #include <yarp/math/Math.h>
 
-#include "CaffeFeatExtractor.hpp"
+#include "GIEFeatExtractor.h"
 
 using namespace std;
 using namespace yarp;
@@ -52,7 +52,7 @@ using namespace yarp::math;
 #define DUMP_CODE                   VOCAB4('d','u','m','p')
 #define DUMP_STOP                   VOCAB4('s','t','o','p')
 
-class CaffeCoderPort: public BufferedPort<Image>
+class GIECoderPort: public BufferedPort<Image>
 {
 private:
 
@@ -80,7 +80,7 @@ private:
 
     // Data (specific for each method - instantiate only those are needed)
 
-    CaffeFeatExtractor<float>    *caffe_extractor;
+    GIEFeatExtractor              *gie_extractor;
 
     void onRead(Image &img)
     {
@@ -95,29 +95,27 @@ private:
         if (img.width()>0 && img.height()>0)
         {
 
-            // Convert the image
+            // Convert the image and check that it is continuous
 
-            cv::Mat tmp_mat=cv::cvarrToMat((IplImage*)img.getIplImage());
+            cv::Mat tmp_mat = cv::cvarrToMat((IplImage*)img.getIplImage());
             cv::cvtColor(tmp_mat, matImg, CV_RGB2BGR);
 
             // Extract the feature vector
 
             std::vector<float> codingVecFloat;
             float times[2];
-            caffe_extractor->extract_singleFeat_1D(matImg, codingVecFloat, times);
-            if (!caffe_extractor->extract_singleFeat_1D(matImg, codingVecFloat, times))
+            if (!gie_extractor->extract_singleFeat_1D(matImg, codingVecFloat, times))
             {
-                std::cout << "CaffeFeatExtractor::extract_singleFeat_1D(): failed..." << std::endl;
+                std::cout << "GIEFeatExtractor::extract_singleFeat_1D(): failed..." << std::endl;
                 return;
             }
             std::vector<double> codingVec(codingVecFloat.begin(), codingVecFloat.end());
 
-            if (caffe_extractor->timing)
+            if (gie_extractor->timing)
             {
                 std::cout << times[0] << ": PREP " << times[1] << ": NET" << std::endl;
             }
 
-            // Dump if required
             if (dump_code)
             {
                 fwrite (&codingVec[0], sizeof(double), codingVec.size(), fout_code);
@@ -126,14 +124,14 @@ private:
             Stamp stamp;
             this->getEnvelope(stamp);
 
-            if(port_out_code.getOutputCount())
+            if (port_out_code.getOutputCount())
             {
                 port_out_code.setEnvelope(stamp);
-                Vector codingYarpVec(codingVec.size(), &codingVec[0]);
+                yarp::sig::Vector codingYarpVec(codingVec.size(), &codingVec[0]);
                 port_out_code.write(codingYarpVec);
             }
 
-            if(port_out_img.getOutputCount())
+            if (port_out_img.getOutputCount())
             {
                 port_out_img.write(img);
             }
@@ -145,7 +143,7 @@ private:
 
 public:
 
-    CaffeCoderPort(ResourceFinder &_rf) :BufferedPort<Image>(),rf(_rf)
+    GIECoderPort(ResourceFinder &_rf) :BufferedPort<Image>(),rf(_rf)
     {
 
         // Resource Finder and module options
@@ -155,34 +153,55 @@ public:
         // Data initialization (specific for Caffe method)
 
         // Binary file (.caffemodel) containing the network's weights
-        string caffemodel_file = rf.check("caffemodel_file", Value("/usr/local/src/robot/caffe/models/bvlc_googlenet/bvlc_googlenet.caffemodel")).asString().c_str();
+        string caffemodel_file = rf.check("caffemodel_file", Value("/usr/local/src/robot/GIE/models/bvlc_googlenet/bvlc_googlenet.caffemodel")).asString().c_str();
         cout << "Setting .caffemodel file to " << caffemodel_file << endl;
-
+           
         // Text file (.prototxt) defining the network structure
-        string prototxt_file = rf.check("prototxt_file", Value(contextPath + "/bvlc_googlenet_val_cutpool5.prototxt")).asString().c_str();
+        string prototxt_file = rf.check("prototxt_file", Value("/usr/local/src/robot/GIE/models/bvlc_googlenet/deploy.prototxt")).asString().c_str();
         cout << "Setting .prototxt file to " << prototxt_file << endl;
 
         // Name of blobs to be extracted
         string blob_name = rf.check("blob_name", Value("pool5/7x7_s1")).asString().c_str();
-        cout << "Setting blob_names to " << blob_name << endl;
 
         // Boolean flag for timing or not the feature extraction
         bool timing = rf.check("timing",Value(false)).asBool();
+    
+        string  binaryproto_meanfile = "";
+        float meanR = -1, meanG = -1, meanB = -1;
+        int resizeWidth = -1, resizeHeight = -1;
+        if (rf.find("binaryproto_meanfile").isNull() && rf.find("meanR").isNull())
+        {
+            cout << "ERROR: missing mean info!!!!!" << endl;
+        }
+        else if (rf.find("binaryproto_meanfile").isNull())
+        {
+            meanR = rf.check("meanR", Value(123)).asDouble();
+            meanG = rf.check("meanG", Value(117)).asDouble();
+            meanB = rf.check("meanB", Value(104)).asDouble();
+            resizeWidth = rf.check("resizeWidth", Value(256)).asDouble();
+            resizeHeight = rf.check("resizeHeight", Value(256)).asDouble();
+            std::cout << "Setting mean to " << " R: " << meanR << " G: " << meanG << " B: " << meanB << std::endl;
+            std::cout << "Resizing anysotropically to " << " W: " << resizeWidth << " H: " << resizeHeight << std::endl;
+            
+        } 
+        else if (rf.find("meanR").isNull())
+        {
+            binaryproto_meanfile = rf.check("binaryproto_meanfile", Value("/usr/local/src/robot/GIE/data/ilsvrc12/imagenet_mean.binaryproto")).asString().c_str();
+            cout << "Setting .binaryproto file to " << binaryproto_meanfile << endl;
+        }
+        else
+        {
+            std::cout << "ERROR: need EITHER mean file (.binaryproto) OR mean pixel values!" << std::endl;
+        }
 
-        // Compute mode and eventually GPU ID to be used
-        string compute_mode = rf.check("compute_mode", Value("GPU")).asString();
-        int device_id = rf.check("device_id", Value(0)).asInt();
-
-        int resizeWidth = rf.check("resizeWidth", Value(256)).asDouble();
-        int resizeHeight = rf.check("resizeHeight", Value(256)).asDouble();
-
-        caffe_extractor = NULL;
-        caffe_extractor = new CaffeFeatExtractor<float>(caffemodel_file,
+        gie_extractor = new GIEFeatExtractor(caffemodel_file, binaryproto_meanfile, meanR, meanG, meanB,
                 prototxt_file, resizeWidth, resizeHeight,
                 blob_name,
-                compute_mode,
-                device_id,
                 timing);
+	    if( !gie_extractor )
+	    {
+		    cout << "Failed to initialize GIEFeatExtractor" << endl;
+	    }
 
         // Data (common to all methods)
 
@@ -243,6 +262,8 @@ public:
 
         port_out_code.close();
         port_out_img.close();
+
+        delete gie_extractor;
 
         BufferedPort<Image>::close();
 
@@ -320,17 +341,17 @@ public:
 };
 
 
-class CaffeCoderModule: public RFModule
+class GIECoderModule: public RFModule
 {
 protected:
-    CaffeCoderPort         *caffePort;
+    GIECoderPort         *GIEPort;
     Port                   rpcPort;
 
 public:
 
-    CaffeCoderModule()
+    GIECoderModule()
 {
-        caffePort=NULL;
+        GIEPort=NULL;
 }
 
     bool configure(ResourceFinder &rf)
@@ -340,9 +361,9 @@ public:
 
         Time::turboBoost();
 
-        caffePort = new CaffeCoderPort(rf);
+        GIEPort = new GIECoderPort(rf);
 
-        caffePort->open(("/"+name+"/img:i").c_str());
+        GIEPort->open(("/"+name+"/img:i").c_str());
 
         rpcPort.open(("/"+name+"/rpc").c_str());
         attach(rpcPort);
@@ -352,8 +373,8 @@ public:
 
     bool interruptModule()
     {
-        if (caffePort!=NULL)
-            caffePort->interrupt();
+        if (GIEPort!=NULL)
+            GIEPort->interrupt();
 
         rpcPort.interrupt();
 
@@ -362,10 +383,10 @@ public:
 
     bool close()
     {
-        if(caffePort!=NULL)
+        if(GIEPort!=NULL)
         {
-            caffePort->close();
-            delete caffePort;
+            GIEPort->close();
+            delete GIEPort;
         }
 
         rpcPort.close();
@@ -375,7 +396,7 @@ public:
 
     bool respond(const Bottle &command, Bottle &reply)
     {
-        if (caffePort->execReq(command,reply))
+        if (GIEPort->execReq(command,reply))
             return true;
         else
             return RFModule::respond(command,reply);
@@ -385,7 +406,7 @@ public:
 
     bool updateModule()
     {
-        //caffePort->update();
+        //GIEPort->update();
 
         return true;
     }
@@ -405,13 +426,13 @@ int main(int argc, char *argv[])
     rf.setVerbose(true);
 
     rf.setDefaultContext("himrep");
-    rf.setDefaultConfigFile("caffeCoder.ini");
+    rf.setDefaultConfigFile("GIECoder_googlenet.ini");
 
     rf.configure(argc,argv);
 
-    rf.setDefault("name","caffeCoder");
+    rf.setDefault("name","GIECoder");
 
-    CaffeCoderModule mod;
+    GIECoderModule mod;
 
     return mod.runModule(rf);
 }
